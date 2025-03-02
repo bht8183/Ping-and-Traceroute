@@ -1,3 +1,18 @@
+"""
+my_traceroute.py
+
+Custom traceroute util that sends UDP packets with increasing TTL
+to discover the path between source and destination.
+
+Usage:
+  python my_traceroute.py <dest> [-n] [-q N] [-S]
+
+Options:
+  -n              Numeric output only
+  -q, --nqueries  Number of probes per hop
+  -S              Print summary of unanswered probes per hop
+"""
+
 import argparse
 import socket
 import struct
@@ -12,11 +27,11 @@ def parse_args():
     Parse and return the command-line arguments.
     """
     parser = argparse.ArgumentParser(description='Custom traceroute utility')
-    parser.add_argument('destination', help='Target hostname or IP')
+    parser.add_argument('destination', help='Target hostname/IP')
     parser.add_argument('-n', action='store_true',
-                        help='Numeric output only, no reverse DNS lookup')
+                        help='Numeric output only')
     parser.add_argument('-q', '--nqueries', type=int, default=3,
-                        help='Number of probes per TTL (default=3)')
+                        help='Number of probes per TTL (made default=3)')
     parser.add_argument('-S', action='store_true',
                         help='Show summary of unanswered probes per hop')
     return parser.parse_args()
@@ -24,8 +39,8 @@ def parse_args():
 
 def resolve_hostname(hostname):
     """
-    Resolve a hostname to its IP address. Return the IP as a string.
-    If resolution fails, print an error and exit.
+    Resolve a hostname to its IP address. Return the IP as string.
+    If resolution fails, print error and exit.
     """
     try:
         return socket.gethostbyname(hostname)
@@ -36,8 +51,8 @@ def resolve_hostname(hostname):
 
 def reverse_dns_lookup(ip_address):
     """
-    Attempt a reverse DNS lookup of the given IP address, returning
-    either the resolved hostname or the IP if resolution fails.
+    Attempt a reverse DNS lookup of the IP address, return
+    either resolved hostname or IP if resolution fails.
     """
     try:
         return socket.gethostbyaddr(ip_address)[0]
@@ -48,20 +63,16 @@ def reverse_dns_lookup(ip_address):
 def main():
     args = parse_args()
 
-    MAX_HOPS = 30               # typical traceroute default
+    MAX_HOPS = 20               # traceroute default
     TIMEOUT_PER_PROBE = 3.0     # seconds to wait for each probe
-    BASE_UDP_PORT = 33434       # typical starting port for traceroute
+    BASE_UDP_PORT = 33434       # starting port for traceroute
 
     destination_ip = resolve_hostname(args.destination)
     print(f"traceroute to {args.destination} ({destination_ip}), "
           f"{MAX_HOPS} hops max, {args.nqueries} probes per hop")
 
-    # On Windows, using IPPROTO_IP for setting TTL often avoids "invalid argument" errors.
-    # On Linux/Mac, SOL_IP is typically fine.
-    if platform.system().lower().startswith('win'):
-        IP_TTL_LEVEL = socket.IPPROTO_IP
-    else:
-        IP_TTL_LEVEL = socket.SOL_IP
+    # Use IPPROTO_IP for setting TTL. This works on Windows
+    IP_TTL_LEVEL = socket.IPPROTO_IP
 
     # Create a raw socket for receiving ICMP messages
     try:
@@ -71,7 +82,7 @@ def main():
         print("Error: Insufficient privileges to create raw socket. Run as Administrator/root.")
         sys.exit(1)
 
-    unanswered_counts = {}  # If -S is used, keep track of unanswered probes at each hop
+    unanswered_counts = {}  # If -S used, keep track of unanswered probes at each hop
 
     reached_destination = False
     for ttl in range(1, MAX_HOPS + 1):
@@ -82,17 +93,16 @@ def main():
         lost_this_hop = 0
 
         for probe_index in range(args.nqueries):
-            # Create a UDP socket for each probe
+            # Create UDP socket for each probe
             send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 
-            # Attempt to set the TTL. On Windows, use IPPROTO_IP. On Linux/Mac, use SOL_IP.
-            # If the TTL is invalid or if there's a platform issue, you may see WinError 10022.
+            # Attempt to set the TTL.
             try:
                 send_sock.setsockopt(IP_TTL_LEVEL, socket.IP_TTL, ttl)
             except OSError as e:
                 print(f"\nError setting socket TTL: {e}")
                 send_sock.close()
-                return  # bail out of the program or handle gracefully
+                return  # bail out of the program
 
             send_sock.bind(("", 0))  # ephemeral source port
             send_time = time.time()
@@ -106,7 +116,7 @@ def main():
                 send_sock.close()
                 break
 
-            # Now wait for an ICMP response
+            # wait for an ICMP response
             addr = None
             icmp_type = None
             icmp_code = None
@@ -116,7 +126,7 @@ def main():
                 rcv_time = time.time()
 
                 addr = addr_info[0]
-                # ICMP header starts at byte 20 (assuming no IP options)
+                # ICMP header starts at byte 20
                 icmp_header = packet[20:28]
                 icmp_type, icmp_code, _, _, _ = struct.unpack('!BBHHH', icmp_header)
 
@@ -134,18 +144,12 @@ def main():
 
         # Output for this hop
         if hop_ips:
-            # If the user does not want numeric-only, try reverse DNS
+
             hop_labels = []
             for ip in hop_ips:
-                if args.n:
-                    hop_labels.append(ip)
-                else:
-                    # Attempt reverse DNS
-                    hostname = reverse_dns_lookup(ip)
-                    if hostname == ip:
-                        hop_labels.append(ip)
-                    else:
-                        hop_labels.append(f"{hostname} ({ip})")
+                
+                hop_labels.append(ip)
+                
 
             # Print the IP/host info
             print(" ".join(hop_labels), end=' ')
@@ -156,14 +160,14 @@ def main():
             print()  # newline
 
         else:
-            # No IP resolved => all probes timed out for this TTL
+            # No IP resolved = all probes timed out for this TTL
             print("* * *")
 
         if args.S:
             unanswered_counts[ttl] = lost_this_hop
 
-        # If we got an ICMP "destination unreachable" (type=3) from the actual target IP,
-        # it's likely we've reached the final destination. Typically code=3 means "Port Unreachable."
+        # If we got an ICMP "destination unreachable" (type=3) from the target IP,
+        # means we reached the final destination.
         if hop_ips and (destination_ip in hop_ips) and (icmp_type == 3):
             reached_destination = True
             break
@@ -175,9 +179,9 @@ def main():
             print(f"  TTL={hop_ttl}: {unanswered_counts[hop_ttl]} unanswered out of {args.nqueries}")
 
     if reached_destination:
-        pass  # We ended early because we arrived
+        pass  # We ended early
     else:
-        pass  # Possibly we reached MAX_HOPS without getting an explicit port-unreachable
+        pass  # we reached MAX_HOPS without getting explicit port-unreachable
         # or the final host never responded
         
 
